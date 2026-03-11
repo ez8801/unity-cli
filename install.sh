@@ -27,7 +27,8 @@ if [ "$OS" = "windows" ]; then
   INSTALL_DIR="$USERPROFILE/bin"
   mkdir -p "$INSTALL_DIR" 2>/dev/null || true
 else
-  INSTALL_DIR="/usr/local/bin"
+  INSTALL_DIR="$HOME/.local/bin"
+  mkdir -p "$INSTALL_DIR"
 fi
 
 BINARY="unity-cli-${OS}-${ARCH}${EXT}"
@@ -40,12 +41,7 @@ chmod +x "/tmp/unity-cli${EXT}"
 
 if [ "$OS" = "windows" ]; then
   mv "/tmp/unity-cli${EXT}" "${INSTALL_DIR}/unity-cli${EXT}"
-elif [ -w "$INSTALL_DIR" ]; then
-  mv /tmp/unity-cli "$INSTALL_DIR/unity-cli"
 else
-  # Fallback to ~/.local/bin if no sudo available
-  INSTALL_DIR="$HOME/.local/bin"
-  mkdir -p "$INSTALL_DIR"
   mv /tmp/unity-cli "$INSTALL_DIR/unity-cli"
 
   # Add to PATH if not already there
