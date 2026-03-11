@@ -356,7 +356,7 @@ unity-cli editor play
 
 ## Author
 
-Created by **DevBookOfArray** (Youngwoo Cho)
+Created by **DevBookOfArray**
 
 [![YouTube](https://img.shields.io/badge/YouTube-DevBookOfArray-red?logo=youtube&logoColor=white)](https://www.youtube.com/@DevBookOfArray)
 [![GitHub](https://img.shields.io/badge/GitHub-youngwoocho02-181717?logo=github)](https://github.com/youngwoocho02)

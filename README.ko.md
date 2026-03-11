@@ -350,7 +350,7 @@ unity-cli editor play
 
 ## 만든 사람
 
-**DevBookOfArray** (조영우)
+**DevBookOfArray**
 
 [![YouTube](https://img.shields.io/badge/YouTube-DevBookOfArray-red?logo=youtube&logoColor=white)](https://www.youtube.com/@DevBookOfArray)
 [![GitHub](https://img.shields.io/badge/GitHub-youngwoocho02-181717?logo=github)](https://github.com/youngwoocho02)
