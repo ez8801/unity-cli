@@ -1,5 +1,4 @@
 using System;
-using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Newtonsoft.Json.Linq;
@@ -32,47 +31,27 @@ namespace UnityCliConnector
         static async Task<object> DispatchInternal(string command, JObject parameters)
         {
             if (command == "list_tools")
-            {
                 return new SuccessResponse("Available tools", ToolDiscovery.GetToolSchemas());
-            }
 
             if (command == "tool_help")
             {
                 var name = parameters?["name"]?.ToString();
                 if (name == null) return new ErrorResponse("Missing 'name' parameter");
-                if (ToolDiscovery.Tools.TryGetValue(name, out var info) == false)
-                    return new ErrorResponse($"Unknown tool: {name}");
-                return new SuccessResponse(info.Description, new
-                {
-                    name = info.Name,
-                    description = info.Description,
-                    group = info.Group,
-                    parameters = ToolDiscovery.GetParameterSchema(info.ParametersType),
-                });
+                var help = ToolDiscovery.GetToolHelp(name);
+                if (help == null) return new ErrorResponse($"Unknown tool: {name}");
+                return new SuccessResponse("Tool info", help);
             }
 
-            if (ToolDiscovery.Tools.TryGetValue(command, out var tool) == false)
-            {
-                return new ErrorResponse($"Unknown command: {command}", new
-                {
-                    registered_tools = ToolDiscovery.Tools.Keys.ToArray(),
-                    tool_count = ToolDiscovery.Tools.Count,
-                });
-            }
+            var handler = ToolDiscovery.FindHandler(command);
+            if (handler == null)
+                return new ErrorResponse($"Unknown command: {command}");
 
-            return await InvokeHandler(command, tool, parameters);
-        }
-
-        static async Task<object> InvokeHandler(string command, ToolDiscovery.ToolInfo tool, JObject parameters)
-        {
             try
             {
-                var result = tool.Handler.Invoke(null, new object[] { parameters ?? new JObject() });
+                var result = handler.Invoke(null, new object[] { parameters ?? new JObject() });
 
                 if (result is Task<object> asyncTask)
-                {
                     return await asyncTask;
-                }
 
                 if (result is Task task)
                 {
