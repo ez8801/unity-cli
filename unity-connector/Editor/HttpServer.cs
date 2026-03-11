@@ -42,7 +42,7 @@ namespace UnityCliConnector
         {
             Start();
             EditorApplication.quitting += Stop;
-            AssemblyReloadEvents.beforeAssemblyReload += Stop;
+            AssemblyReloadEvents.beforeAssemblyReload += StopListener;
             AssemblyReloadEvents.afterAssemblyReload += Start;
             EditorApplication.projectChanged += Restart;
             EditorApplication.update += ProcessQueue;
@@ -50,7 +50,7 @@ namespace UnityCliConnector
 
         static void Restart()
         {
-            Stop();
+            StopListener();
             Start();
         }
 
@@ -88,11 +88,10 @@ namespace UnityCliConnector
             Debug.LogError("[UnityCliConnector] Failed to start HTTP server — no available port");
         }
 
-        static void Stop()
+        static void StopListener()
         {
             if (s_Listener == null) return;
 
-            var port = s_Port;
             s_Cts?.Cancel();
             s_Cts?.Dispose();
             s_Cts = null;
@@ -104,10 +103,15 @@ namespace UnityCliConnector
             }
             catch
             {
-                // Ignore cleanup errors
             }
 
             s_Listener = null;
+        }
+
+        static void Stop()
+        {
+            var port = s_Port;
+            StopListener();
             InstanceRegistry.Unregister();
             Debug.Log($"[UnityCliConnector] HTTP server stopped (was port {port})");
         }
