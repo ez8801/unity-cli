@@ -58,6 +58,8 @@ Or add directly to `Packages/manifest.json`:
 "com.youngwoocho02.unity-cli-connector": "https://github.com/youngwoocho02/unity-cli.git?path=unity-connector"
 ```
 
+To pin a specific version, append `#v0.1.0` to the URL.
+
 Once added, the Connector starts automatically when Unity opens. No configuration needed.
 
 ## How It Works
