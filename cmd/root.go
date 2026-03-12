@@ -381,6 +381,7 @@ Create a static class with [UnityCliTool] in any Editor assembly:
   - Override name: [UnityCliTool(Name = "my_name")]
   - Runs on Unity main thread — all Unity APIs are safe
   - Discovered on Editor start and after every script recompilation
+  - Duplicate tool names are detected and logged as errors (first wins)
 
 ## Using Tools
 
