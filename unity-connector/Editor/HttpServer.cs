@@ -116,6 +116,12 @@ namespace UnityCliConnector
             Debug.Log($"[UnityCliConnector] HTTP server stopped (was port {port})");
         }
 
+        static void ForceEditorUpdate()
+        {
+            try { UnityEditorInternal.InternalEditorUtility.RepaintAllViews(); }
+            catch { }
+        }
+
         static void ProcessQueue()
         {
             while (s_Queue.TryDequeue(out var item))
@@ -198,6 +204,7 @@ namespace UnityCliConnector
                             Parameters = parameters,
                             Tcs = tcs,
                         });
+                        ForceEditorUpdate();
                         result = await tcs.Task;
                     }
                 }
