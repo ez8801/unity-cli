@@ -175,6 +175,9 @@ unity-cli console --lines 20 --filter all
 # 에러만 읽기
 unity-cli console --filter error
 
+# 스택 트레이스 포함 (short: 내부 프레임 필터링, full: 원본 그대로)
+unity-cli console --stacktrace short
+
 # 콘솔 지우기
 unity-cli console --clear
 ```

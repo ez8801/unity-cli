@@ -221,6 +221,7 @@ Console:
   console                       Read error & warning logs (default)
   console --lines 20            Limit to N entries
   console --filter all          Filter: error, warn, log, all
+  console --stacktrace short    Stack trace: none (default), short, full
   console --clear               Clear console
 
 Execute C#:
@@ -314,12 +315,16 @@ Read Unity console log entries.
 Options:
   --lines <N>          Limit to N entries
   --filter <mode>      Filter: error, warn, log, all (default: error+warn)
+  --stacktrace <mode>  none: first line only (default)
+                        short: with stack trace, internal frames filtered
+                        full: raw message including all frames
   --clear              Clear console
 
 Examples:
   unity-cli console
   unity-cli console --lines 20 --filter all
-  unity-cli console --filter error
+  unity-cli console --stacktrace short
+  unity-cli console --filter error --stacktrace full
   unity-cli console --clear
 `)
 	case "exec":

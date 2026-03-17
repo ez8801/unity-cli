@@ -37,5 +37,10 @@ func consoleCmd(args []string, send sendFn) (*client.CommandResponse, error) {
 		}
 	}
 
+	// --stacktrace: none (first line only), short (filter internal frames), full (raw)
+	if v, ok := flags["stacktrace"]; ok {
+		params["stacktrace"] = v
+	}
+
 	return send("read_console", params)
 }

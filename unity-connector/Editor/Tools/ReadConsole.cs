@@ -56,6 +56,9 @@ namespace UnityCliConnector.Tools
 
             [ToolParameter("Filter log messages containing this text")]
             public string FilterText { get; set; }
+
+            [ToolParameter("Stack trace mode: none (first line), short (filtered), full (raw). Default: none")]
+            public string Stacktrace { get; set; }
         }
 
         public static object HandleCommand(JObject @params)
@@ -83,15 +86,16 @@ namespace UnityCliConnector.Tools
                     ?? new List<string> { "error", "warning" };
                 int? count = p.GetInt("count");
                 string filterText = p.Get("filterText");
+                string stacktrace = p.Get("stacktrace", "none").ToLower();
                 if (types.Contains("all")) types = new List<string> { "error", "warning", "log" };
 
-                return GetEntries(types, count, filterText);
+                return GetEntries(types, count, filterText, stacktrace);
             }
 
             return new ErrorResponse($"Unknown action: '{action}'. Valid: get, clear.");
         }
 
-        private static object GetEntries(List<string> types, int? count, string filterText)
+        private static object GetEntries(List<string> types, int? count, string filterText, string stacktrace)
         {
             var entries = new List<string>();
             try
@@ -116,8 +120,7 @@ namespace UnityCliConnector.Tools
                     if (!want) continue;
                     if (!string.IsNullOrEmpty(filterText) && message.IndexOf(filterText, StringComparison.OrdinalIgnoreCase) < 0) continue;
 
-                    string[] lines = message.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
-                    entries.Add(lines.Length > 0 ? lines[0] : message);
+                    entries.Add(FormatMessage(message, stacktrace));
 
                     if (count.HasValue && entries.Count >= count.Value) break;
                 }
@@ -128,6 +131,36 @@ namespace UnityCliConnector.Tools
             }
 
             return new SuccessResponse($"Retrieved {entries.Count} entries.", entries);
+        }
+
+        private static string FormatMessage(string message, string mode)
+        {
+            switch (mode)
+            {
+                case "full":
+                    return message;
+
+                case "short":
+                    var lines = message.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
+                    var sb = new System.Text.StringBuilder();
+                    foreach (var line in lines)
+                    {
+                        // Skip Unity/system internal frames
+                        if (line.Contains("UnityEngine.Debug:") ||
+                            line.Contains("UnityEditor.EditorGUIUtility:") ||
+                            line.Contains("Unity.Entities.SystemState:") ||
+                            line.Contains("(at Library/") ||
+                            line.Contains("(at ./Library/"))
+                            continue;
+                        if (sb.Length > 0) sb.Append('\n');
+                        sb.Append(line);
+                    }
+                    return sb.ToString();
+
+                default: // "none"
+                    string[] firstLine = message.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
+                    return firstLine.Length > 0 ? firstLine[0] : message;
+            }
         }
 
         private const int ErrorMask =
