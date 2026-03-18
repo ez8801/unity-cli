@@ -75,7 +75,6 @@ namespace UnityCliConnector
 
                     _ = ListenLoop(s_Cts.Token);
 
-                    InstanceRegistry.Register(port);
                     Debug.Log($"[UnityCliConnector] HTTP server started on port {port}");
                     return;
                 }
@@ -116,7 +115,6 @@ namespace UnityCliConnector
         {
             var port = s_Port;
             StopListener();
-            InstanceRegistry.Unregister();
             Debug.Log($"[UnityCliConnector] HTTP server stopped (was port {port})");
         }
 

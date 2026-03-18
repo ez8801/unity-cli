@@ -12,13 +12,14 @@ import (
 	"time"
 )
 
-// Instance represents a running Unity Editor registered via the Connector package.
+// Instance represents a running Unity Editor discovered from ~/.unity-cli/instances/.
 type Instance struct {
+	State        string `json:"state"`
 	ProjectPath  string `json:"projectPath"`
 	Port         int    `json:"port"`
 	PID          int    `json:"pid"`
 	UnityVersion string `json:"unityVersion,omitempty"`
-	RegisteredAt string `json:"registeredAt,omitempty"`
+	Timestamp    int64  `json:"timestamp,omitempty"`
 }
 
 // CommandRequest is the JSON body sent to Unity's HTTP server.
@@ -35,37 +36,84 @@ type CommandResponse struct {
 	Data    json.RawMessage `json:"data,omitempty"`
 }
 
-func instancesPath() string {
+func instancesDir() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".unity-cli", "instances.json")
+	return filepath.Join(home, ".unity-cli", "instances")
 }
 
-// DiscoverInstance finds a running Unity instance from instances.json.
+// ScanInstances reads all instance files from ~/.unity-cli/instances/.
+func ScanInstances() ([]Instance, error) {
+	dir := instancesDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	var instances []Instance
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		var inst Instance
+		if err := json.Unmarshal(data, &inst); err != nil {
+			continue
+		}
+		instances = append(instances, inst)
+	}
+	return instances, nil
+}
+
+// FindByPort scans instance files and returns the one matching the given port.
+func FindByPort(port int) (*Instance, error) {
+	instances, err := ScanInstances()
+	if err != nil {
+		return nil, err
+	}
+	for _, inst := range instances {
+		if inst.Port == port {
+			return &inst, nil
+		}
+	}
+	return nil, fmt.Errorf("no instance on port %d", port)
+}
+
+// DiscoverInstance finds a running Unity instance from ~/.unity-cli/instances/.
 // If port > 0, skips discovery and connects directly.
 // If project is set, matches by project path substring.
-// Otherwise returns the last registered instance (most recently opened).
+// Otherwise returns the most recently active instance.
 func DiscoverInstance(project string, port int) (*Instance, error) {
 	if port > 0 {
 		return &Instance{ProjectPath: "override", Port: port}, nil
 	}
 
-	path := instancesPath()
-	data, err := os.ReadFile(path)
+	instances, err := ScanInstances()
 	if err != nil {
-		return nil, fmt.Errorf("no Unity instances found.\nIs Unity running with the Connector package?\nExpected: %s", path)
+		return nil, fmt.Errorf("no Unity instances found.\nIs Unity running with the Connector package?\nExpected: %s", instancesDir())
 	}
 
-	var instances []Instance
-	if err := json.Unmarshal(data, &instances); err != nil {
-		return nil, fmt.Errorf("failed to parse instances.json: %w", err)
+	// Filter: alive (timestamp within 3s) and not stopped
+	now := time.Now().UnixMilli()
+	var alive []Instance
+	for _, inst := range instances {
+		if inst.State == "stopped" {
+			continue
+		}
+		if now-inst.Timestamp > 3000 {
+			continue
+		}
+		alive = append(alive, inst)
 	}
 
-	if len(instances) == 0 {
-		return nil, fmt.Errorf("no Unity instances registered")
+	if len(alive) == 0 {
+		return nil, fmt.Errorf("no Unity instances running")
 	}
 
 	if project != "" {
-		for _, inst := range instances {
+		for _, inst := range alive {
 			if strings.Contains(inst.ProjectPath, project) {
 				return &inst, nil
 			}
@@ -73,7 +121,14 @@ func DiscoverInstance(project string, port int) (*Instance, error) {
 		return nil, fmt.Errorf("no Unity instance found for project: %s", project)
 	}
 
-	return &instances[len(instances)-1], nil
+	// Return the most recently updated
+	best := alive[0]
+	for _, inst := range alive[1:] {
+		if inst.Timestamp > best.Timestamp {
+			best = inst
+		}
+	}
+	return &best, nil
 }
 
 func Send(inst *Instance, command string, params interface{}, timeoutMs int) (*CommandResponse, error) {

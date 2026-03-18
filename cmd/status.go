@@ -1,24 +1,12 @@
 package cmd
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/youngwoocho02/unity-cli/internal/client"
 )
-
-// UnityStatus is written by the Connector's Heartbeat every 0.5s to ~/.unity-cli/status/{port}.json.
-type UnityStatus struct {
-	State        string `json:"state"`
-	ProjectPath  string `json:"projectPath"`
-	Port         int    `json:"port"`
-	PID          int    `json:"pid"`
-	UnityVersion string `json:"unityVersion"`
-	Timestamp    int64  `json:"timestamp"`
-}
 
 func statusCmd(inst *client.Instance) error {
 	status, err := readStatus(inst.Port)
@@ -39,21 +27,9 @@ func statusCmd(inst *client.Instance) error {
 	return nil
 }
 
-// readStatus reads the heartbeat file written by the Connector for the given port.
-func readStatus(port int) (*UnityStatus, error) {
-	home, _ := os.UserHomeDir()
-	path := filepath.Join(home, ".unity-cli", "status", fmt.Sprintf("%d.json", port))
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-
-	var status UnityStatus
-	if err := json.Unmarshal(data, &status); err != nil {
-		return nil, err
-	}
-	return &status, nil
+// readStatus finds the instance file matching the given port.
+func readStatus(port int) (*client.Instance, error) {
+	return client.FindByPort(port)
 }
 
 // waitForAlive reads the current timestamp, then polls until a newer one appears.
