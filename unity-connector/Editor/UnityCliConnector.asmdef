@@ -1,7 +1,7 @@
 {
   "name": "UnityCliConnector.Editor",
   "rootNamespace": "UnityCliConnector",
-  "references": [],
+  "references": ["Unity.ugui"],
   "includePlatforms": ["Editor"],
   "excludePlatforms": [],
   "allowUnsafeCode": false,
