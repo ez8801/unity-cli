@@ -62,6 +62,10 @@ go test -tags integration ./...
 
 CI skips these since Unity is not available.
 
+## Git
+
+Commit all unstaged changes before finishing. Unrelated changes should be committed separately.
+
 ## CI
 
 - `push/PR → main`: build, vet, test, lint, format
