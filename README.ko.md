@@ -420,7 +420,7 @@ unity-cli spawn --params '{"x":1,"y":0,"z":5,"prefab":"Goblin"}'
 
 **주요 사항:**
 
-- **이름**: 클래스명에서 자동 생성 (`SpawnEnemy` → `spawn_enemy`). `Name = "..."`으로 오버라이드 가능.
+- **이름**: `Name` 없으면 클래스명에서 자동 생성 (`SpawnEnemy` → `spawn_enemy`, `UITree` → `ui_tree`). `Name = "spawn"`이면 `unity-cli spawn`으로 호출.
 - **Parameters 클래스**: 선택 사항이지만 권장. `unity-cli list`에서 파라미터 이름, 타입, 설명, 필수 여부를 노출 — AI 어시스턴트가 소스 코드 없이 도구 사용법을 파악 가능.
 - **ToolParams**: `p.Get()`, `p.GetInt()`, `p.GetFloat()`, `p.GetBool()`, `p.GetRaw()`로 일관된 파라미터 읽기.
 - **탐지**: `unity-cli list`에서 built-in 도구(`group: "built-in"`)가 먼저, 연결된 프로젝트의 custom 도구(`group: "custom"`)가 뒤에 표시.
