@@ -1,8 +1,9 @@
 using System;
 using System.IO;
+using System.Security.Cryptography;
+using System.Text;
 using Newtonsoft.Json;
 using UnityEditor;
-using UnityEditor.Compilation;
 using UnityEngine;
 
 namespace UnityCliConnector
@@ -11,12 +12,13 @@ namespace UnityCliConnector
     public static class Heartbeat
     {
         static readonly string s_Dir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".unity-cli", "status");
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".unity-cli", "instances");
 
         static double s_LastWrite;
         const double INTERVAL = 0.5;
         static string s_ForcedState;
         static double s_CompileRequestTime;
+        static string s_FilePath;
 
         static Heartbeat()
         {
@@ -24,7 +26,6 @@ namespace UnityCliConnector
             EditorApplication.quitting += Cleanup;
             AssemblyReloadEvents.beforeAssemblyReload += OnBeforeAssemblyReload;
             AssemblyReloadEvents.afterAssemblyReload += () => { s_ForcedState = null; s_LastWrite = 0; };
-            CompilationPipeline.compilationStarted += _ => WriteState("compiling");
             EditorApplication.playModeStateChanged += OnPlayModeChanged;
         }
 
@@ -77,6 +78,17 @@ namespace UnityCliConnector
             Write();
         }
 
+        static string GetFilePath()
+        {
+            if (s_FilePath != null) return s_FilePath;
+            var projectPath = Application.dataPath.Replace("/Assets", "");
+            using var md5 = MD5.Create();
+            var hash = BitConverter.ToString(md5.ComputeHash(Encoding.UTF8.GetBytes(projectPath)))
+                .Replace("-", "").Substring(0, 16).ToLower();
+            s_FilePath = Path.Combine(s_Dir, $"{hash}.json");
+            return s_FilePath;
+        }
+
         static void Write()
         {
             var status = new
@@ -87,16 +99,13 @@ namespace UnityCliConnector
                 pid = System.Diagnostics.Process.GetCurrentProcess().Id,
                 unityVersion = Application.unityVersion,
                 timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                compileErrors = EditorUtility.scriptCompilationFailed,
             };
 
             try
             {
                 Directory.CreateDirectory(s_Dir);
-                var path = Path.Combine(s_Dir, $"{HttpServer.Port}.json");
-                File.WriteAllText(path, JsonConvert.SerializeObject(status));
-
-                // Keep instances.json in sync so CLI always finds the correct port
-                InstanceRegistry.Register(HttpServer.Port);
+                File.WriteAllText(GetFilePath(), JsonConvert.SerializeObject(status));
             }
             catch
             {
@@ -115,15 +124,8 @@ namespace UnityCliConnector
         public static void Cleanup()
         {
             if (HttpServer.Port == 0) return;
-
-            try
-            {
-                var path = Path.Combine(s_Dir, $"{HttpServer.Port}.json");
-                if (File.Exists(path)) File.Delete(path);
-            }
-            catch
-            {
-            }
+            s_ForcedState = "stopped";
+            Write();
         }
     }
 }

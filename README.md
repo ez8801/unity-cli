@@ -18,7 +18,7 @@ That felt wrong. If I can `curl` a URL, why do I need all that?
 
 So I built the opposite: a single binary that talks directly to Unity via HTTP. No server to run — the Unity package listens automatically. No config to write — it discovers Unity instances on its own. No tool registration — just call by name. No caching, no protocol layers, no ceremony.
 
-The entire CLI is ~800 lines of Go (plus ~300 lines of help text). The Unity-side connector is ~1,700 lines of C#. It's just a thin layer that lets you control Unity from the shell — nothing more. You install the binary, add the Unity package, and it works.
+The entire CLI is ~800 lines of Go (plus ~300 lines of help text). The Unity-side connector is ~2,300 lines of C#. It's just a thin layer that lets you control Unity from the shell — nothing more. You install the binary, add the Unity package, and it works.
 
 ## Install
 
@@ -93,10 +93,10 @@ unity-cli status
 unity-cli editor play --wait
 
 # Run C# code inside Unity
-unity-cli exec "Application.dataPath"
+unity-cli exec "return Application.dataPath;"
 
 # Read console logs
-unity-cli console --filter all
+unity-cli console --type error,warning,log
 ```
 
 ## How It Works
@@ -106,7 +106,7 @@ Terminal                              Unity Editor
 ────────                              ────────────
 $ unity-cli editor play --wait
     │
-    ├─ reads ~/.unity-cli/instances.json
+    ├─ scans ~/.unity-cli/instances/*.json
     │  → finds Unity on port 8090
     │
     ├─ POST http://127.0.0.1:8090/command
@@ -131,15 +131,29 @@ $ unity-cli editor play --wait
 
 The Unity Connector:
 1. Opens an HTTP server on `localhost:8090` when the Editor starts
-2. Registers itself in `~/.unity-cli/instances.json` so the CLI knows where to connect
-3. Writes a heartbeat to `~/.unity-cli/status/{port}.json` every 0.5s with the current state
+2. Writes a per-project instance file to `~/.unity-cli/instances/` so the CLI knows where to connect
+3. Updates the instance file every 0.5s with the current state (heartbeat)
 4. Discovers all `[UnityCliTool]` classes via reflection on each request
 5. Routes incoming commands to the matching handler on the main thread
 6. Survives domain reloads (script recompilation)
 
-Before compiling or reloading, the Connector records the state (`compiling`, `reloading`) to the status file. When the main thread freezes, the timestamp stops updating. The CLI detects this and waits for a fresh timestamp before sending commands.
+Before compiling or reloading, the Connector records the state (`compiling`, `reloading`) to the instance file. When the main thread freezes, the timestamp stops updating. The CLI detects this and waits for a fresh timestamp before sending commands.
 
 ## Built-in Commands
+
+| Command | Description |
+|---------|-------------|
+| `editor` | Play/stop/pause/refresh the Unity Editor |
+| `console` | Read, filter, and clear console logs |
+| `exec` | Run arbitrary C# code inside Unity |
+| `test` | Run EditMode/PlayMode tests |
+| `menu` | Execute any Unity menu item by path |
+| `reserialize` | Re-serialize assets through Unity's serializer |
+| `screenshot` | Capture scene/game view as PNG |
+| `profiler` | Read profiler hierarchy, control recording |
+| `list` | Show all available tools with parameter schemas |
+| `status` | Show Unity Editor connection state |
+| `update` | Self-update the CLI binary |
 
 ### Editor Control
 
@@ -170,13 +184,13 @@ unity-cli editor refresh --compile
 unity-cli console
 
 # Read last 20 log entries of all types
-unity-cli console --lines 20 --filter all
+unity-cli console --lines 20 --filter error,warning,log
 
 # Read only errors
-unity-cli console --filter error
+unity-cli console --type error
 
-# Include stack traces (short: filtered, full: raw)
-unity-cli console --stacktrace short
+# Include stack traces (user: user code only, full: raw)
+unity-cli console --stacktrace user
 
 # Clear console
 unity-cli console --clear
@@ -186,30 +200,19 @@ unity-cli console --clear
 
 Run arbitrary C# code inside the Unity Editor at runtime. This is the most powerful command — it gives you full access to UnityEngine, UnityEditor, ECS, and every loaded assembly. No need to write a custom tool for one-off queries or mutations.
 
-Single expressions auto-return their result. Multi-statement code needs an explicit `return`.
+Use `return` to get output. Common namespaces are included by default. Add `--usings` only for project-specific types (e.g. `Unity.Entities`). The csc compiler and dotnet runtime are auto-detected; if detection fails, specify manually with `--csc <path>` or `--dotnet <path>`.
 
 ```bash
-# Simple expressions
-unity-cli exec "Time.time"
-unity-cli exec "Application.dataPath"
-unity-cli exec "EditorSceneManager.GetActiveScene().name" --usings UnityEditor.SceneManagement
+unity-cli exec "return Application.dataPath;"
+unity-cli exec "return EditorSceneManager.GetActiveScene().name;"
+unity-cli exec "return World.All.Count;" --usings Unity.Entities
 
-# Query game objects
-unity-cli exec "GameObject.FindObjectsOfType<Camera>().Length"
-unity-cli exec "Selection.activeGameObject?.name ?? \"nothing selected\""
-
-# Multi-statement (explicit return)
-unity-cli exec "var go = new GameObject(\"Marker\"); go.tag = \"EditorOnly\"; return go.name;"
-
-# ECS world inspection with extra usings
-unity-cli exec "World.All.Count" --usings Unity.Entities
-unity-cli exec "var sb = new System.Text.StringBuilder(); foreach(var w in World.All) sb.AppendLine(w.Name); return sb.ToString();" --usings Unity.Entities
-
-# Modify project settings at runtime
-unity-cli exec "PlayerSettings.bundleVersion = \"1.2.3\"; return PlayerSettings.bundleVersion;"
+# Pipe via stdin to avoid shell escaping issues
+echo 'Debug.Log("hello"); return null;' | unity-cli exec
+echo 'var go = new GameObject("Marker"); go.tag = "EditorOnly"; return go.name;' | unity-cli exec
 ```
 
-Because `exec` compiles and runs real C#, it can do anything a custom tool can — inspect ECS entities, modify assets, call internal APIs, run editor utilities. For AI agents, this means **zero-friction access to Unity's entire runtime** without writing a single line of tool code.
+Because `exec` compiles and runs real C#, it can do anything a custom tool can — inspect ECS entities, modify assets, call internal APIs, run editor utilities. For AI agents, this means **zero-friction access to Unity's entire runtime** without writing a single line of tool code. Piping via stdin avoids shell escaping headaches with complex code.
 
 ### Menu Items
 
@@ -279,6 +282,23 @@ unity-cli profiler status
 unity-cli profiler clear
 ```
 
+### Run Tests
+
+Run EditMode and PlayMode tests via the Unity Test Framework.
+
+```bash
+# Run EditMode tests (default)
+unity-cli test
+
+# Run PlayMode tests
+unity-cli test --mode PlayMode
+
+# Filter by test name (substring match)
+unity-cli test --filter MyTestClass
+```
+
+Requires the Unity Test Framework package. PlayMode tests trigger a domain reload — the CLI polls for results automatically.
+
 ### List Tools
 
 ```bash
@@ -340,13 +360,11 @@ Create a static class with `[UnityCliTool]` attribute in any Editor assembly. Th
 ```csharp
 using UnityCliConnector;
 using Newtonsoft.Json.Linq;
+using UnityEngine;
 
-[UnityCliTool(Description = "Spawn an enemy at a position")]
+[UnityCliTool(Name = "spawn", Description = "Spawn an enemy at a position", Group = "gameplay")]
 public static class SpawnEnemy
 {
-    // Command name auto-derived: "spawn_enemy"
-    // Call with: unity-cli spawn_enemy --params '{"x":1,"y":0,"z":5}'
-
     public class Parameters
     {
         [ToolParameter("X world position", Required = true)]
@@ -358,16 +376,17 @@ public static class SpawnEnemy
         [ToolParameter("Z world position", Required = true)]
         public float Z { get; set; }
 
-        [ToolParameter("Prefab name in Resources folder")]
+        [ToolParameter("Prefab name in Resources folder", DefaultValue = "Enemy")]
         public string Prefab { get; set; }
     }
 
     public static object HandleCommand(JObject parameters)
     {
-        float x = parameters["x"]?.Value<float>() ?? 0;
-        float y = parameters["y"]?.Value<float>() ?? 0;
-        float z = parameters["z"]?.Value<float>() ?? 0;
-        string prefabName = parameters["prefab"]?.Value<string>() ?? "Enemy";
+        var p = new ToolParams(parameters);
+        float x = p.GetFloat("x", 0);
+        float y = p.GetFloat("y", 0);
+        float z = p.GetFloat("z", 0);
+        string prefabName = p.Get("prefab", "Enemy");
 
         var prefab = Resources.Load<GameObject>(prefabName);
         var instance = Object.Instantiate(prefab, new Vector3(x, y, z), Quaternion.identity);
@@ -381,7 +400,31 @@ public static class SpawnEnemy
 }
 ```
 
-The `Parameters` class is optional but recommended. When present, `unity-cli list` exposes parameter names, types, descriptions, and required flags — so AI assistants can discover how to call your tool without reading the source code.
+Call it directly with flags or JSON:
+
+```bash
+unity-cli spawn --x 1 --y 0 --z 5 --prefab Goblin
+unity-cli spawn --params '{"x":1,"y":0,"z":5,"prefab":"Goblin"}'
+```
+
+**Key points:**
+
+- **Name**: without `Name`, auto-derived from class name (`SpawnEnemy` → `spawn_enemy`, `UITree` → `ui_tree`). With `Name = "spawn"`, the command becomes `unity-cli spawn`.
+- **Parameters class**: optional but recommended. `unity-cli list` uses it to expose parameter names, types, descriptions, and required flags — so AI assistants can discover your tool without reading the source.
+- **ToolParams**: use `p.Get()`, `p.GetInt()`, `p.GetFloat()`, `p.GetBool()`, `p.GetRaw()` for consistent param reading.
+- **Discovery**: `unity-cli list` shows built-in tools first (`group: "built-in"`), then custom tools (`group: "custom"`) detected from the connected Unity project.
+
+**Attribute reference:**
+
+| Attribute | Property | Description |
+|---|---|---|
+| `[UnityCliTool]` | `Name` | Command name override (default: class name → snake_case) |
+| | `Description` | Tool description shown in `list` |
+| | `Group` | Group name for categorization |
+| `[ToolParameter]` | `Description` | Parameter description (constructor arg) |
+| | `Required` | Whether the parameter is required (default: `false`) |
+| | `Name` | Parameter name override |
+| | `DefaultValue` | Default value hint |
 
 ### Rules
 
@@ -401,7 +444,7 @@ When multiple Unity Editors are open, each registers on a different port (8090, 
 
 ```bash
 # See all running instances
-cat ~/.unity-cli/instances.json
+ls ~/.unity-cli/instances/
 
 # Select by project path
 unity-cli --project MyGame editor play

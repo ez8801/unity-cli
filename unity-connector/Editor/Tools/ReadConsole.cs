@@ -8,7 +8,7 @@ using UnityEngine;
 
 namespace UnityCliConnector.Tools
 {
-    [UnityCliTool(Description = "Read or clear Unity console logs.")]
+    [UnityCliTool(Name = "console", Description = "Read or clear Unity console logs.")]
     public static class ReadConsole
     {
         private static MethodInfo _startGettingEntriesMethod, _endGettingEntriesMethod, _clearMethod, _getCountMethod, _getEntryMethod;
@@ -55,20 +55,17 @@ namespace UnityCliConnector.Tools
 
         public class Parameters
         {
-            [ToolParameter("Action: get (default) or clear")]
-            public string Action { get; set; }
-
-            [ToolParameter("Log types to include: error, warning, log, all")]
-            public string[] Types { get; set; }
+            [ToolParameter("Comma-separated log types: error, warning, log. Default: error,warning,log")]
+            public string Type { get; set; }
 
             [ToolParameter("Maximum number of log entries to return")]
-            public int Count { get; set; }
+            public int Lines { get; set; }
 
-            [ToolParameter("Filter log messages containing this text")]
-            public string FilterText { get; set; }
-
-            [ToolParameter("Stack trace mode: none (first line), short (filtered), full (raw). Default: none")]
+            [ToolParameter("Stack trace mode: none (first line), user (user code frames only), full (raw). Default: user")]
             public string Stacktrace { get; set; }
+
+            [ToolParameter("Clear console")]
+            public bool Clear { get; set; }
         }
 
         public static object HandleCommand(JObject @params)
@@ -82,30 +79,24 @@ namespace UnityCliConnector.Tools
                 return new ErrorResponse("Parameters cannot be null.");
 
             var p = new ToolParams(@params);
-            string action = p.Get("action", "get").ToLower();
 
-            if (action == "clear")
+            // --clear
+            if (p.GetBool("clear"))
             {
                 _clearMethod.Invoke(null, null);
                 return new SuccessResponse("Console cleared.");
             }
 
-            if (action == "get")
-            {
-                var types = (p.GetRaw("types") as JArray)?.Select(t => t.ToString().ToLower()).ToList()
-                    ?? new List<string> { "error", "warning" };
-                int? count = p.GetInt("count");
-                string filterText = p.Get("filterText");
-                string stacktrace = p.Get("stacktrace", "none").ToLower();
-                if (types.Contains("all")) types = new List<string> { "error", "warning", "log" };
+            var type = p.Get("type", "error,warning,log").ToLower();
+            var types = type.Split(',').Select(t => t.Trim()).Where(t => t.Length > 0).ToList();
 
-                return GetEntries(types, count, filterText, stacktrace);
-            }
+            int? count = p.GetInt("lines") ?? p.GetInt("count");
+            string stacktrace = p.Get("stacktrace", "user").ToLower();
 
-            return new ErrorResponse($"Unknown action: '{action}'. Valid: get, clear.");
+            return GetEntries(types, count, stacktrace);
         }
 
-        private static object GetEntries(List<string> types, int? count, string filterText, string stacktrace)
+        private static object GetEntries(List<string> types, int? count, string stacktrace)
         {
             var entries = new List<string>();
             try
@@ -127,7 +118,6 @@ namespace UnityCliConnector.Tools
                         : types.Contains(logType.ToString().ToLowerInvariant());
 
                     if (!want) continue;
-                    if (!string.IsNullOrEmpty(filterText) && message.IndexOf(filterText, StringComparison.OrdinalIgnoreCase) < 0) continue;
 
                     entries.Add(FormatMessage(message, stacktrace));
 
@@ -149,7 +139,7 @@ namespace UnityCliConnector.Tools
                 case "full":
                     return message;
 
-                case "short":
+                case "user":
                     var lines = message.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
                     var sb = new System.Text.StringBuilder();
                     foreach (var line in lines)

@@ -1,63 +1,80 @@
 using System;
-using System.CodeDom.Compiler;
 using System.Collections;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
 using System.Reflection;
 using System.Text;
 using System.Text.RegularExpressions;
-using Microsoft.CSharp;
 using Newtonsoft.Json.Linq;
+using UnityEditor;
+using UnityEngine;
 
 namespace UnityCliConnector.Tools
 {
-    [UnityCliTool(Description = "Execute arbitrary C# code at runtime. Full access to Unity and all loaded assemblies.")]
+    [UnityCliTool(Name = "exec", Description = "Execute arbitrary C# code at runtime. Full access to Unity and all loaded assemblies.")]
     public static class ExecuteCsharp
     {
         private static readonly string[] DefaultUsings =
         {
             "System",
             "System.Collections.Generic",
+            "System.IO",
             "System.Linq",
             "System.Reflection",
+            "System.Threading.Tasks",
             "UnityEngine",
+            "UnityEngine.SceneManagement",
             "UnityEditor",
+            "UnityEditor.SceneManagement",
+            "UnityEditorInternal",
         };
 
         public class Parameters
         {
-            [ToolParameter("C# code to execute. Single expressions auto-return their result", Required = true)]
+            [ToolParameter("C# code to execute. Use 'return' for output.", Required = true)]
             public string Code { get; set; }
 
-            [ToolParameter("Additional using directives (e.g. Unity.Entities, Unity.Mathematics)")]
+            [ToolParameter("Additional using directives (comma-separated, e.g. Unity.Entities,Unity.Mathematics)")]
             public string[] Usings { get; set; }
+
+            [ToolParameter("Path to csc compiler (csc.dll or csc.exe). Auto-detected if omitted.")]
+            public string Csc { get; set; }
+
+            [ToolParameter("Path to dotnet runtime. Auto-detected if omitted.")]
+            public string Dotnet { get; set; }
         }
 
         public static object HandleCommand(JObject parameters)
         {
-            var code = parameters["code"]?.Value<string>();
+            var p = new ToolParams(parameters);
+            var code = p.Get("code")
+                ?? (p.GetRaw("args") as JArray)?[0]?.ToString();
             if (string.IsNullOrEmpty(code))
                 return new ErrorResponse("'code' required");
 
-            var extraUsings = parameters["usings"]?.ToObject<string[]>();
-
-            if (Regex.IsMatch(code, @"\breturn\b") == false)
+            var usingsToken = p.GetRaw("usings");
+            var extraUsings = new List<string>();
+            if (usingsToken != null)
             {
-                var trimmed = code.TrimEnd().TrimEnd(';');
-                code = $"return (object)({trimmed});";
+                if (usingsToken.Type == JTokenType.Array)
+                    extraUsings.AddRange(usingsToken.ToObject<string[]>());
+                else
+                    extraUsings.AddRange(usingsToken.ToString().Split(','));
             }
 
-            var source = BuildSource(code, extraUsings);
-            return CompileAndExecute(source);
+            var cscPath = p.Get("csc");
+            var dotnetPath = p.Get("dotnet");
+            return CompileAndExecute(BuildSource(code, extraUsings), cscPath, dotnetPath);
         }
 
-        private static string BuildSource(string code, string[] extraUsings)
+        private static string BuildSource(string code, List<string> extraUsings)
         {
             var sb = new StringBuilder();
             foreach (var u in DefaultUsings)
                 sb.AppendLine($"using {u};");
-            if (extraUsings != null)
-                foreach (var u in extraUsings)
-                    sb.AppendLine($"using {u};");
+            foreach (var u in extraUsings)
+                sb.AppendLine($"using {u};");
 
             sb.AppendLine();
             sb.AppendLine("public static class __CliDynamic {");
@@ -68,86 +85,178 @@ namespace UnityCliConnector.Tools
             return sb.ToString();
         }
 
-        private static object CompileAndExecute(string source)
+        private static object CompileAndExecute(string source, string cscOverride = null, string dotnetOverride = null)
         {
-            var provider = new CSharpCodeProvider();
-            var cp = new CompilerParameters
-            {
-                GenerateInMemory = true,
-                GenerateExecutable = false,
-                TreatWarningsAsErrors = false
-            };
+            var utf8 = new UTF8Encoding(false);
+            var tmpDir = Path.Combine(Path.GetTempPath(), "unity-cli-exec");
+            Directory.CreateDirectory(tmpDir);
 
-            var references = new List<string>();
-            var added = new HashSet<string>();
-            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
-            {
-                try
-                {
-                    if (asm.IsDynamic || string.IsNullOrEmpty(asm.Location)) continue;
-                    var name = asm.GetName().Name;
-                    if (!added.Add(name)) continue;
-                    if (name == "mscorlib") continue;
-                    if (IsBclFacade(asm)) continue;
-                    references.Add(asm.Location);
-                }
-                catch { }
-            }
-
-            // Use a response file to avoid Windows command line length limits (32,767 chars).
-            // Large Unity projects can load 300+ assemblies, easily exceeding this limit.
-            string rspPath = null;
-            try
-            {
-                rspPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"unity_cli_{Guid.NewGuid():N}.rsp");
-                var rspContent = new StringBuilder();
-                foreach (var r in references)
-                    rspContent.AppendLine($"/r:\"{r}\"");
-                System.IO.File.WriteAllText(rspPath, rspContent.ToString());
-                cp.CompilerOptions = $"@\"{rspPath}\"";
-            }
-            catch
-            {
-                // Fallback: add references directly (may fail on large projects)
-                foreach (var r in references)
-                    cp.ReferencedAssemblies.Add(r);
-            }
+            var id = Guid.NewGuid().ToString("N").Substring(0, 8);
+            var srcFile = Path.Combine(tmpDir, $"{id}.cs");
+            var outFile = Path.Combine(tmpDir, $"{id}.dll");
+            var rspFile = Path.Combine(tmpDir, $"{id}.rsp");
 
             try
             {
-                var result = provider.CompileAssemblyFromSource(cp, source);
-                if (result.Errors.HasErrors)
+                File.WriteAllText(srcFile, source, utf8);
+
+                var rsp = new StringBuilder();
+                rsp.AppendLine("-target:library");
+                rsp.AppendLine($"-out:\"{outFile}\"");
+                rsp.AppendLine("-nologo");
+                rsp.AppendLine("-nowarn:0105,1701,1702");
+                rsp.AppendLine("-langversion:latest");
+                rsp.AppendLine($"\"{srcFile}\"");
+
+                var added = new HashSet<string>();
+                foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
                 {
-                    var errors = new List<string>();
-                    foreach (CompilerError err in result.Errors)
-                        if (!err.IsWarning) errors.Add($"L{err.Line}: {err.ErrorText}");
-                    return new ErrorResponse($"Compile error:\n{string.Join("\n", errors)}");
+                    try
+                    {
+                        if (asm.IsDynamic || string.IsNullOrEmpty(asm.Location)) continue;
+                        if (!added.Add(asm.GetName().Name)) continue;
+                        rsp.AppendLine($"-r:\"{asm.Location}\"");
+                    }
+                    catch { }
                 }
 
-                var method = result.CompiledAssembly.GetType("__CliDynamic")?.GetMethod("Execute");
+                File.WriteAllText(rspFile, rsp.ToString(), utf8);
+
+                var rspArg = $"@\"{rspFile}\"";
+                var csc = FindCsc(cscOverride);
+                string exe, args;
+
+                if (csc != null && csc.EndsWith(".dll"))
+                {
+                    var dotnet = FindDotnet(dotnetOverride);
+                    if (dotnet == null)
+                        return new ErrorResponse(
+                            "Cannot find dotnet runtime under: " +
+                            EditorApplication.applicationContentsPath +
+                            "\nSpecify the path manually with --dotnet <path>");
+                    exe = dotnet;
+                    args = $"exec \"{csc}\" {rspArg}";
+                }
+                else if (csc != null)
+                {
+                    exe = csc;
+                    args = rspArg;
+                }
+                else
+                {
+                    return new ErrorResponse(
+                        "Cannot find csc compiler under: " +
+                        EditorApplication.applicationContentsPath +
+                        "\nSpecify the path manually with --csc <path-to-csc.dll-or-csc.exe>");
+                }
+
+                var psi = new ProcessStartInfo
+                {
+                    FileName = exe,
+                    Arguments = args,
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true,
+                    StandardOutputEncoding = Encoding.UTF8,
+                    StandardErrorEncoding = Encoding.UTF8,
+                };
+
+                using (var proc = Process.Start(psi))
+                {
+                    var stdout = proc.StandardOutput.ReadToEnd();
+                    var stderr = proc.StandardError.ReadToEnd();
+                    proc.WaitForExit(30000);
+
+                    if (proc.ExitCode != 0)
+                    {
+                        var output = string.IsNullOrEmpty(stderr) ? stdout : stderr;
+                        return new ErrorResponse($"Compile error:\n{FormatErrors(output)}");
+                    }
+                }
+
+                var bytes = File.ReadAllBytes(outFile);
+                var compiled = Assembly.Load(bytes);
+                var method = compiled.GetType("__CliDynamic")?.GetMethod("Execute");
                 if (method == null)
                     return new ErrorResponse("Internal error: compiled type or method not found.");
-                var output = method.Invoke(null, null);
-                return new SuccessResponse("OK", Serialize(output, 0));
+
+                object result;
+                try
+                {
+                    result = method.Invoke(null, null);
+                }
+                catch (TargetInvocationException tie)
+                {
+                    var inner = tie.InnerException ?? tie;
+                    return new ErrorResponse($"Runtime error: {inner.GetType().Name}: {inner.Message}");
+                }
+                return new SuccessResponse("OK", Serialize(result, 0));
             }
             finally
             {
-                if (rspPath != null) try { System.IO.File.Delete(rspPath); } catch { }
+                try { File.Delete(srcFile); } catch { }
+                try { File.Delete(outFile); } catch { }
+                try { File.Delete(rspFile); } catch { }
             }
         }
 
-        private static bool IsBclFacade(Assembly asm)
+        private static string FindCsc(string cscOverride = null)
         {
-            var name = asm.GetName().Name;
-            if (!name.StartsWith("System.")) return false;
-            if (name.StartsWith("System.Private.")) return false;
+            if (!string.IsNullOrEmpty(cscOverride))
+                return cscOverride;
+
+            var content = EditorApplication.applicationContentsPath;
+            var cscDll = SearchFile(content, "csc.dll");
+            if (cscDll != null) return cscDll;
+
+            if (Application.platform == RuntimePlatform.WindowsEditor)
+            {
+                var cscExe = SearchFile(content, "csc.exe");
+                if (cscExe != null) return cscExe;
+            }
+
+            return null;
+        }
+
+        private static string SearchFile(string dir, string name)
+        {
             try
             {
-                foreach (var attr in asm.GetCustomAttributesData())
-                    if (attr.AttributeType.Name == "TypeForwardedToAttribute") return true;
+                var files = Directory.GetFiles(dir, name, SearchOption.AllDirectories);
+                foreach (var f in files)
+                    if (Path.GetFileName(f) == name)
+                        return f;
             }
             catch { }
-            return false;
+            return null;
+        }
+
+        private static string FindDotnet(string dotnetOverride = null)
+        {
+            if (!string.IsNullOrEmpty(dotnetOverride))
+                return dotnetOverride;
+
+            var name = "dotnet" + (Application.platform == RuntimePlatform.WindowsEditor ? ".exe" : "");
+            var found = SearchFile(EditorApplication.applicationContentsPath, name);
+            return found ?? name;
+        }
+
+        private static string FormatErrors(string raw)
+        {
+            var lines = raw.Split('\n');
+            var errors = new List<string>();
+            foreach (var line in lines)
+            {
+                var trimmed = line.Trim();
+                if (string.IsNullOrEmpty(trimmed)) continue;
+                var m = Regex.Match(trimmed, @"\((\d+),\d+\):\s*error\s+\w+:\s*(.+)");
+                if (m.Success)
+                    errors.Add($"L{m.Groups[1].Value}: {m.Groups[2].Value}");
+                else if (trimmed.Contains("error"))
+                    errors.Add(trimmed);
+            }
+            return errors.Count > 0 ? string.Join("\n", errors) : raw;
         }
 
         private static object Serialize(object obj, int depth)

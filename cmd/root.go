@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -67,7 +68,9 @@ func Execute() error {
 		if err != nil {
 			return err
 		}
-		return statusCmd(inst)
+		statusErr := statusCmd(inst)
+		printUpdateNotice()
+		return statusErr
 	}
 
 	inst, err := client.DiscoverInstance(flagProject, flagPort)
@@ -89,48 +92,24 @@ func Execute() error {
 	switch category {
 	case "editor":
 		resp, err = editorCmd(subArgs, send, inst.Port)
-	case "console":
-		resp, err = consoleCmd(subArgs, send)
+	case "test":
+		testSend := func(command string, params interface{}) (*client.CommandResponse, error) {
+			return client.Send(inst, command, params, 0)
+		}
+		resp, err = testCmd(subArgs, testSend, inst.Port)
 	case "exec":
-		resp, err = execCmd(subArgs, send)
-	case "list":
-		resp, err = send("list_tools", map[string]interface{}{})
-	case "profiler":
-		resp, err = profilerCmd(subArgs, send)
-	case "menu":
-		resp, err = menuCmd(subArgs, send)
-	case "reserialize":
-		resp, err = reserializeCmd(subArgs, send)
+		subArgs = readStdinIfPiped(subArgs)
+		var params map[string]interface{}
+		params, err = buildParams(subArgs, nil)
+		if err == nil {
+			resp, err = send("exec", params)
+		}
 	default:
-		// Direct custom tool call — flags become params directly
-		// e.g. `unity-cli system_tree --depth 1 --scope project` → {"depth":1,"scope":"project"}
-		params := map[string]interface{}{}
-		flags := parseSubFlags(subArgs)
-		if raw, ok := flags["params"]; ok {
-			if jsonErr := json.Unmarshal([]byte(raw), &params); jsonErr != nil {
-				return fmt.Errorf("invalid JSON in --params: %w", jsonErr)
-			}
+		var params map[string]interface{}
+		params, err = buildParams(subArgs, nil)
+		if err == nil {
+			resp, err = send(category, params)
 		}
-		// Merge remaining flags into params (--params takes precedence for conflicts)
-		for k, v := range flags {
-			if k == "params" {
-				continue
-			}
-			if _, exists := params[k]; exists {
-				continue
-			}
-			// Try to parse as int, then bool, then keep as string
-			if n, err := strconv.Atoi(v); err == nil {
-				params[k] = n
-			} else if v == "true" {
-				params[k] = true
-			} else if v == "false" {
-				params[k] = false
-			} else {
-				params[k] = v
-			}
-		}
-		resp, err = send(category, params)
 	}
 
 	if err != nil {
@@ -138,6 +117,8 @@ func Execute() error {
 	}
 
 	printResponse(resp)
+
+	printUpdateNotice()
 
 	if !resp.Success {
 		os.Exit(1)
@@ -201,26 +182,75 @@ func parseSubFlags(args []string) map[string]string {
 	return flags
 }
 
-func setInt(flags map[string]string, params map[string]interface{}, flag, param string) {
-	if v, ok := flags[flag]; ok {
+// buildParams parses --flag value pairs and positional args from args and merges with base params.
+func buildParams(args []string, base map[string]interface{}) (map[string]interface{}, error) {
+	params := map[string]interface{}{}
+	for k, v := range base {
+		params[k] = v
+	}
+
+	var positional []string
+	flags := map[string]string{}
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if strings.HasPrefix(a, "--") {
+			key := a[2:]
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "--") {
+				flags[key] = args[i+1]
+				i++
+			} else {
+				flags[key] = "true"
+			}
+		} else {
+			positional = append(positional, a)
+		}
+	}
+
+	if raw, ok := flags["params"]; ok {
+		if jsonErr := json.Unmarshal([]byte(raw), &params); jsonErr != nil {
+			return nil, fmt.Errorf("invalid JSON in --params: %w", jsonErr)
+		}
+	}
+	for k, v := range flags {
+		if k == "params" {
+			continue
+		}
+		if _, exists := params[k]; exists {
+			continue
+		}
 		if n, err := strconv.Atoi(v); err == nil {
-			params[param] = n
+			params[k] = n
+		} else if v == "true" {
+			params[k] = true
+		} else if v == "false" {
+			params[k] = false
+		} else {
+			params[k] = v
 		}
 	}
+
+	if len(positional) > 0 {
+		params["args"] = positional
+	}
+
+	return params, nil
 }
 
-func setFloat(flags map[string]string, params map[string]interface{}, flag, param string) {
-	if v, ok := flags[flag]; ok {
-		if f, err := strconv.ParseFloat(v, 64); err == nil {
-			params[param] = f
-		}
+// readStdinIfPiped reads stdin when piped and prepends it as the first positional arg.
+func readStdinIfPiped(args []string) []string {
+	info, err := os.Stdin.Stat()
+	if err != nil {
+		return args
 	}
-}
-
-func setStr(flags map[string]string, params map[string]interface{}, flag, param string) {
-	if v, ok := flags[flag]; ok {
-		params[param] = v
+	if info.Mode()&os.ModeCharDevice != 0 {
+		return args // interactive terminal, not piped
 	}
+	data, err := io.ReadAll(os.Stdin)
+	if err != nil || len(data) == 0 {
+		return args
+	}
+	code := strings.TrimRight(string(data), "\n\r")
+	return append([]string{code}, args...)
 }
 
 // splitArgs separates global flags (--port, --project, --timeout) from subcommand args.
@@ -255,12 +285,13 @@ Editor Control:
 Console:
   console                       Read error & warning logs (default)
   console --lines 20            Limit to N entries
-  console --filter all          Filter: error, warn, log, all
-  console --stacktrace short    Stack trace: none (default), short, full
+  console --type error,warning,log   Filter by log types (comma-separated)
+  console --stacktrace full     Stack trace: none, user (default), full
   console --clear               Clear console
 
 Execute C#:
-  exec "<code>"                 Run C# code in Unity (single expression auto-returns)
+  exec "<code>"                 Run C# code in Unity (return required for output)
+  echo '<code>' | exec          Pipe code via stdin (avoids shell escaping)
   exec "<code>" --usings x,y    Add extra using directives
 
   Examples:
@@ -275,6 +306,11 @@ Menu:
     menu "File/Save Project"
     menu "Assets/Refresh"
 
+Screenshot:
+  screenshot                          Capture scene view (default)
+  screenshot --view game              Capture game view
+  screenshot --output_path <path>     Custom output path
+
 Reserialize:
   reserialize [path...]          Force reserialize (no args = entire project)
 
@@ -282,6 +318,11 @@ Reserialize:
     reserialize                                                    Reserialize entire project
     reserialize Assets/Scenes/Main.unity
     reserialize Assets/Prefabs/A.prefab Assets/Prefabs/B.prefab
+
+Tests:
+  test                            Run EditMode tests (default)
+  test --mode PlayMode            Run PlayMode tests
+  test --filter <name>            Filter by namespace, class, or full test name
 
 Profiler:
   profiler hierarchy              Top-level profiler samples (last frame)
@@ -349,17 +390,17 @@ Read Unity console log entries.
 
 Options:
   --lines <N>          Limit to N entries
-  --filter <mode>      Filter: error, warn, log, all (default: error+warn)
-  --stacktrace <mode>  none: first line only (default)
-                        short: with stack trace, internal frames filtered
+  --type <types>       Comma-separated log types: error, warning, log (default: error,warning,log)
+  --stacktrace <mode>  none: first line only
+                        user: with stack trace, internal frames filtered (default)
                         full: raw message including all frames
   --clear              Clear console
 
 Examples:
   unity-cli console
-  unity-cli console --lines 20 --filter all
-  unity-cli console --stacktrace short
-  unity-cli console --filter error --stacktrace full
+  unity-cli console --lines 20 --type error,warning,log
+  unity-cli console --stacktrace user
+  unity-cli console --type error --stacktrace full
   unity-cli console --clear
 `)
 	case "exec":
@@ -368,22 +409,31 @@ Examples:
 Execute C# code inside Unity Editor. Full access to UnityEngine,
 UnityEditor, and all loaded assemblies.
 
-Single expressions auto-return their result.
-Multi-statement code needs an explicit 'return' statement.
+Use 'return' to get output. Add --usings for types outside default namespaces.
 
 Options:
   --usings <ns1,ns2>   Add extra using directives
+  --csc <path>         Path to csc compiler (csc.dll or csc.exe). Auto-detected if omitted.
+  --dotnet <path>      Path to dotnet runtime. Auto-detected if omitted.
+
+Default usings: System, System.Collections.Generic, System.IO, System.Linq,
+  System.Reflection, System.Threading.Tasks, UnityEngine,
+  UnityEngine.SceneManagement, UnityEditor, UnityEditor.SceneManagement,
+  UnityEditorInternal
 
 Examples:
-  unity-cli exec "Time.time"
-  unity-cli exec "Application.dataPath"
-  unity-cli exec "EditorSceneManager.GetActiveScene().name" --usings UnityEditor.SceneManagement
-  unity-cli exec "var go = new GameObject(\"Test\"); return go.name;"
-  unity-cli exec "World.All.Count" --usings Unity.Entities
+  unity-cli exec "return 1+1;"
+  unity-cli exec "return Application.dataPath;"
+  echo 'return EditorSceneManager.GetActiveScene().name;' | unity-cli exec
+  echo 'Debug.Log("hello"); return null;' | unity-cli exec
+  unity-cli exec "return World.All.Count;" --usings Unity.Entities
+
+Stdin:
+  Pipe code via stdin to avoid shell escaping issues.
+  echo '<code>' | unity-cli exec [--usings ns1,ns2]
 
 Notes:
-  - Strings inside code need escaped quotes: \"text\"
-  - Compilation errors are returned in the response message
+  - Use 'return' for output, 'return null;' for void operations
 `)
 	case "menu":
 		fmt.Print(`Usage: unity-cli menu "<path>"
@@ -396,6 +446,24 @@ Examples:
   unity-cli menu "Window/General/Console"
 
 Note: File/Quit is blocked for safety.
+`)
+	case "screenshot":
+		fmt.Print(`Usage: unity-cli screenshot [options]
+
+Capture a screenshot of the Unity editor.
+
+Options:
+  --view <mode>      scene (default), game
+  --width <N>        Image width in pixels (default: 1920)
+  --height <N>       Image height in pixels (default: 1080)
+  --output_path <path>  Output path, absolute or relative to project root
+                        (default: Screenshots/screenshot.png)
+
+Examples:
+  unity-cli screenshot
+  unity-cli screenshot --view game
+  unity-cli screenshot --view scene --width 3840 --height 2160
+  unity-cli screenshot --output_path captures/my_scene.png
 `)
 	case "reserialize":
 		fmt.Print(`Usage: unity-cli reserialize [path...]
@@ -417,6 +485,8 @@ Subcommands:
     --depth <N>         Recursive depth (0=unlimited, default: 1)
     --root <name>       Set root by name (substring match, searches full tree)
     --frames <N>        Average over last N frames (flat output, sorted by time)
+    --from <N>          Start frame index for range average
+    --to <N>            End frame index for range average
     --parent <ID>       Drill into item by ID
     --min <ms>          Filter items below threshold
     --sort <col>        Sort by: total (default), self, calls
@@ -433,6 +503,27 @@ Examples:
   unity-cli profiler hierarchy --root SimulationSystem --depth 3
   unity-cli profiler hierarchy --frames 30 --min 0.5 --sort self
   unity-cli profiler enable
+`)
+	case "test":
+		fmt.Print(`Usage: unity-cli test [options]
+
+Run Unity tests via the Test Runner API.
+
+Options:
+  --mode <EditMode|PlayMode>    Test mode (default: EditMode)
+  --filter <name>               Filter by namespace, class, or full test name
+                                Must be the full path (e.g. MyNamespace.MyClass)
+
+EditMode tests hold the connection open and return results directly.
+PlayMode tests return immediately and poll a results file (domain reload safe).
+
+Requires the Unity Test Framework package (com.unity.test-framework).
+
+Examples:
+  unity-cli test
+  unity-cli test --mode PlayMode
+  unity-cli test --filter MyNamespace.MyTests
+  unity-cli test --mode EditMode --filter MyNamespace.MyTests.SpecificTest
 `)
 	case "list":
 		fmt.Print(`Usage: unity-cli list

@@ -1,24 +1,12 @@
 package cmd
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/youngwoocho02/unity-cli/internal/client"
 )
-
-// UnityStatus is written by the Connector's Heartbeat every 0.5s to ~/.unity-cli/status/{port}.json.
-type UnityStatus struct {
-	State        string `json:"state"`
-	ProjectPath  string `json:"projectPath"`
-	Port         int    `json:"port"`
-	PID          int    `json:"pid"`
-	UnityVersion string `json:"unityVersion"`
-	Timestamp    int64  `json:"timestamp"`
-}
 
 func statusCmd(inst *client.Instance) error {
 	status, err := readStatus(inst.Port)
@@ -39,27 +27,20 @@ func statusCmd(inst *client.Instance) error {
 	return nil
 }
 
-// readStatus reads the heartbeat file written by the Connector for the given port.
-func readStatus(port int) (*UnityStatus, error) {
-	home, _ := os.UserHomeDir()
-	path := filepath.Join(home, ".unity-cli", "status", fmt.Sprintf("%d.json", port))
+// readStatus finds the instance file matching the given port (any state).
+func readStatus(port int) (*client.Instance, error) {
+	return client.FindByPort(port)
+}
 
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-
-	var status UnityStatus
-	if err := json.Unmarshal(data, &status); err != nil {
-		return nil, err
-	}
-	return &status, nil
+// readActiveStatus finds the active (non-stopped) instance on the given port.
+func readActiveStatus(port int) (*client.Instance, error) {
+	return client.FindActiveByPort(port)
 }
 
 // waitForAlive reads the current timestamp, then polls until a newer one appears.
 func waitForAlive(port int, timeoutMs int) error {
 	baseline := time.Now().UnixMilli()
-	if status, err := readStatus(port); err == nil {
+	if status, err := readActiveStatus(port); err == nil {
 		baseline = status.Timestamp
 	}
 
@@ -73,7 +54,7 @@ func waitForAlive(port int, timeoutMs int) error {
 	deadline := time.Now().Add(time.Duration(timeoutMs) * time.Millisecond)
 	for time.Now().Before(deadline) {
 		time.Sleep(500 * time.Millisecond)
-		status, err := readStatus(port)
+		status, err := readActiveStatus(port)
 		if err != nil {
 			continue
 		}
@@ -87,18 +68,27 @@ func waitForAlive(port int, timeoutMs int) error {
 }
 
 // waitForReady polls indefinitely until the heartbeat state becomes "ready".
-func waitForReady(port int) {
+// Returns true if compilation had errors.
+func waitForReady(port int) bool {
 	fmt.Fprintf(os.Stderr, "Waiting for compilation...\n")
 
-	for {
+	deadline := time.Now().Add(5 * time.Minute)
+	for time.Now().Before(deadline) {
 		time.Sleep(500 * time.Millisecond)
-		status, err := readStatus(port)
+		status, err := readActiveStatus(port)
 		if err != nil {
 			continue
 		}
 		if status.State == "ready" {
-			fmt.Fprintf(os.Stderr, "Compilation complete.\n")
-			return
+			if status.CompileErrors {
+				fmt.Fprintf(os.Stderr, "Compilation finished with errors.\n")
+			} else {
+				fmt.Fprintf(os.Stderr, "Compilation complete.\n")
+			}
+			return status.CompileErrors
 		}
 	}
+
+	fmt.Fprintf(os.Stderr, "Timed out waiting for compilation (5m).\n")
+	return true
 }
